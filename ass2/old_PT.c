@@ -10,11 +10,13 @@
 #include "PageTable.h"
 
 // Symbolic constants
+
 #define NOT_USED 0
 #define IN_MEMORY 1
 #define ON_DISK 2
 
 // PTE = Page Table Entry
+
 typedef struct {
    char status;      // NOT_USED, IN_MEMORY, ON_DISK
    char modified;    // boolean: changed since loaded
@@ -38,14 +40,21 @@ static int  nPages;         // # entries in page table
 static int  replacePolicy;  // how to do page replacement
 
 static int  firstPNO;       // index of first PTE in FIFO list
+static PTE *firstPTE;
+
 static int  lastPNO;       // index of last PTE in FIFO list
+static PTE *lastPTE;
+
+static PTE *prevPTE;       // stores previous PTE
+static int prevPNO;        // stores pno of previous PTE
+
 
 // Forward refs for private functions
+
 static int findVictim(int);
-static void addToList(PTE *p, int pno);
-static void removeFromList(PTE *p, int pno);
 
 // initPageTable: create/initialise Page Table data structures
+
 void initPageTable(int policy, int np)
 {
    PageTable = malloc(np * sizeof(PTE));
@@ -55,8 +64,8 @@ void initPageTable(int policy, int np)
    }
    replacePolicy = policy;
    nPages = np;
-   firstPNO = NONE;
-   lastPNO = NONE;
+   firstPNO = 0;
+   lastPNO = nPages-1;
    for (int i = 0; i < nPages; i++) {
       PTE *p = &PageTable[i];
       p->status = NOT_USED;
@@ -65,8 +74,8 @@ void initPageTable(int policy, int np)
       p->accessTime = NONE;
       p->loadTime = NONE;
       p->nPeeks = p->nPokes = 0;
-      p->next = NONE;
-      p->prev = NONE;
+      p->next = -1;
+      p->prev = -1;
    }
 }
 
@@ -74,6 +83,7 @@ void initPageTable(int policy, int np)
 // returns memory frame holding this page
 // page may have to be loaded
 // PTE(status,modified,frame,accessTime,nextPage,nPeeks,nWrites)
+
 int requestPage(int pno, char mode, int time)
 {
    if (pno < 0 || pno >= nPages) {
@@ -81,6 +91,15 @@ int requestPage(int pno, char mode, int time)
       exit(EXIT_FAILURE);
    }
    PTE *p = &PageTable[pno];
+   int fno; // frame number
+
+   if (time == 0) {
+      firstPNO = pno;
+      firstPTE = &PageTable[firstPNO];
+
+      lastPNO = pno;
+      lastPTE = &PageTable[lastPNO];
+   }
 
    switch (p->status) {
    case NOT_USED:
@@ -89,13 +108,36 @@ int requestPage(int pno, char mode, int time)
       // TODO: add stats collection
       countPageFault();
 
-      int fno = findFreeFrame();
-      if (fno == NONE) {
+      fno = findFreeFrame();
+      if (fno != NONE) {
+
+         p->prev = prevPNO;
+         if (time != 0) {
+            prevPTE->next = pno;
+         }
+
+         lastPNO = pno;
+         lastPTE = p;
+         lastPTE->prev = prevPNO;
+         
+      } else {
          int vno = findVictim(time);
+         firstPNO = firstPTE->next;
+         prevPTE->next = pno;
+         
 #ifdef DBUG
          printf("Evict page %d\n",vno);
 #endif
+         // TODO:
          PTE *vic = &PageTable[vno];
+         firstPTE->next = vic->next;
+         firstPTE = &PageTable[firstPTE->next];
+         vic->next = 0;
+         vic->prev = 0;
+
+         lastPNO = pno;
+         lastPTE = p;
+         lastPTE->prev = prevPNO;
 
          // if victim page modified, save its frame
          fno = vic->frame;
@@ -104,34 +146,26 @@ int requestPage(int pno, char mode, int time)
          vic->status = ON_DISK;
          vic->modified = 0;
          vic->frame = vic->accessTime = vic->loadTime = NONE;
-
-         // remove the victim from page table
-         removeFromList(vic, vno);
       }
       printf("Page %d given frame %d\n",pno,fno);
-      
+      // TODO:
       // load page pno into frame fno
       loadFrame(fno, pno, time);
 
       // update PTE for page
+      // - new status
       p->status = IN_MEMORY;
+      // - not yet modified
       p->modified = 0;
+      // - associated with frame fno
       p->frame = fno;
+      // - just loaded
       p->loadTime = time;
-
-      // add new page into page table
-      addToList(p, pno);
       break;
 
    case IN_MEMORY:
       // TODO: add stats collection
       countPageHit();
-      if (replacePolicy == REPL_LRU) {
-         // remove the entry that was accessed from PTE list
-         removeFromList(p, pno);
-         // re-add the entry that was accessed to end of PTE list
-         addToList(p, pno);
-      }
       break;
    default:
       fprintf(stderr,"Invalid page status\n");
@@ -144,49 +178,39 @@ int requestPage(int pno, char mode, int time)
       p->modified = 1;
    }
 
-   // THESE PRINTS USEFUL FOR DEBUGGING
-   // Prints each page's number, next and prev in the PTE List
-   // and also notes the first and last items in the PTE List
-   
-   // printf("first_page=%d, first_page->next=%d\n", firstPNO, PageTable[firstPNO].next);
+   p->accessTime = time;
+
+   prevPTE = p;
+   prevPNO = pno;
+   firstPTE->prev = 0;
+
+   // printf("firstPNO = %d, firstPTE->next = %d\n", firstPNO, firstPTE->next);
    // for (int i = 0; i < nPages; i++) {
    //    PTE *n = &PageTable[i];
-   //    printf("Page=%d, page->prev=%d, page->next=%d\n",i,n->prev, n->next);
+   //    printf("PTE=%d, p->prev=%d, p->next=%d\n",i,n->prev, n->next);
    // }
-   // printf("last_page=%d, last_page->prev=%d\n",lastPNO, PageTable[lastPNO].prev);
+   // printf("lastPNO = %d, lastPTE->prev = %d\n",lastPNO, lastPTE->prev);
 
-   p->accessTime = time;
+
    return p->frame;
 }
 
-// addToList: adds the given page to the end of the PTE list
-static void addToList(PTE *p, int pno) {
-   if (lastPNO == NONE) firstPNO = pno;
-   else PageTable[lastPNO].next = pno;
-   p->next = NONE;
-   p->prev = lastPNO;
-   lastPNO = pno;
-}
+// findVictim: find a page to be replaced
+// uses the configured replacement policy
 
-// removeFromList: removes the given page from the PTE list
-static void removeFromList(PTE *p, int pno) {
-   if (p->prev == NONE) firstPNO = p->next;
-   else PageTable[p->prev].next = p->next;
-   if (p->next == NONE) lastPNO = p->prev;
-   else PageTable[p->next].prev = p->prev;
-}
-
-// findVictim: find the page to be replaced
-// this page is always the first page in the PTE list
 static int findVictim(int time)
 {
    int victim = firstPNO;
-   if (replacePolicy == REPL_CLOCK) return 0;
-   else return victim;
+   switch (replacePolicy) {
+   case REPL_CLOCK:
+      return 0;
+   }
+   return victim;
 }
 
 // showPageTableStatus: dump page table
 // PTE(status,modified,frame,accessTime,nextPage,nPeeks,nWrites)
+
 void showPageTableStatus(void)
 {
    char *s;

@@ -59,8 +59,9 @@ int main(int argc, char *argv[], char *envp[])
 		//fork
 		pid = fork();
 		if (pid != 0) {
-			// continue;
+			// wait;
 			wait(&stat);
+
 		}
 		else {
 			execute(args, path, envp);
@@ -98,6 +99,7 @@ void execute(char **args, char **path, char **envp)
 		if (solution == -1) {
 			printf("Exec failed\n");
 		} 
+		printf("Test\n");
 		free(command);
 	}
 }
